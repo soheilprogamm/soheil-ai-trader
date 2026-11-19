@@ -1,112 +1,103 @@
 import os
-import json
-import time
-import urllib.request
-import urllib.parse
+import requests
+from flask import Flask, request, abort
 
-TOKEN = os.environ.get("BOT_TOKEN")
+app = Flask(__name__)
 
-if not TOKEN:
-    raise RuntimeError("BOT_TOKEN is not configured")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
-API = f"https://api.telegram.org/bot{TOKEN}/"
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-def telegram(method, data=None):
-    url = API + method
-    payload = urllib.parse.urlencode(data or {}).encode()
-    req = urllib.request.Request(url, data=payload)
 
-    with urllib.request.urlopen(req, timeout=40) as response:
-        return json.loads(response.read())
+def send_message(chat_id, text):
+    requests.post(
+        f"{TELEGRAM_API}/sendMessage",
+        json={"chat_id": chat_id, "text": text},
+        timeout=15
+    )
 
-def send(chat_id, text):
-    telegram("sendMessage", {
-        "chat_id": chat_id,
-        "text": text
-    })
 
 def get_btc_price():
-    url = (
-        "https://apiv2.nobitex.ir/market/stats"
-        "?srcCurrency=btc&dstCurrency=usdt"
-    )
+    url = "https://apiv2.nobitex.ir/market/stats"
+    params = {
+        "srcCurrency": "btc",
+        "dstCurrency": "usdt"
+    }
 
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "SoheilAITrader/1.0"}
-    )
+    response = requests.get(url, params=params, timeout=15)
+    data = response.json()
 
-    with urllib.request.urlopen(req, timeout=15) as response:
-        data = json.loads(response.read())
+    stats = data.get("stats", {})
+    market = stats.get("btc-usdt", {})
 
-    return float(data["stats"]["btc-usdt"]["latest"])
+    price = market.get("latest") or market.get("bestBuy")
 
-def handle(chat_id, command):
+    if price:
+        return price
 
-    if command == "/start":
-        send(
+    return "قیمت در حال حاضر در دسترس نیست."
+
+
+@app.route("/health")
+def health():
+    return "Soheil AI Trader is running!"
+
+
+@app.route("/telegram", methods=["POST"])
+def telegram():
+    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+        abort(403)
+
+    update = request.get_json(silent=True) or {}
+    message = update.get("message", {})
+
+    chat_id = message.get("chat", {}).get("id")
+    text = message.get("text", "")
+
+    if not chat_id:
+        return "OK"
+
+    if text == "/start":
+        send_message(
             chat_id,
-            "🤖 به Soheil AI Trader خوش آمدی!\n\n"
-            "ربات آماده است.\n"
-            "حالت فعلی: آزمایشی\n"
-            "معاملات واقعی: غیرفعال\n\n"
-            "/price - قیمت بیت کوین\n"
+            "سلام! به Soheil AI Trader خوش آمدی.\n"
+            "برای مشاهده قیمت بیت‌کوین دستور /price را بفرست."
+        )
+
+    elif text == "/price":
+        try:
+            price = get_btc_price()
+            send_message(chat_id, f"قیمت BTC/USDT:\n{price}")
+        except Exception:
+            send_message(chat_id, "خطا در دریافت قیمت از نوبیتکس.")
+
+    elif text == "/status":
+        send_message(chat_id, "ربات فعال است. حالت فعلی: آزمایشی.")
+
+    elif text == "/help":
+        send_message(
+            chat_id,
+            "دستورات ربات:\n"
+            "/start - شروع\n"
+            "/price - قیمت بیت‌کوین\n"
             "/status - وضعیت ربات\n"
             "/help - راهنما"
         )
 
-    elif command == "/price":
-        try:
-            price = get_btc_price()
-            send(
-                chat_id,
-                f"📊 قیمت لحظه‌ای BTC/USDT:\n"
-                f"{price:,.2f} USDT"
-            )
-        except Exception as error:
-            send(chat_id, f"خطا در دریافت قیمت: {error}")
+    return "OK"
 
-    elif command == "/status":
-        send(
-            chat_id,
-            "🟢 Soheil AI Trader فعال است.\n"
-            "حالت: Paper Trading\n"
-            "معاملات واقعی: خاموش"
+
+if BOT_TOKEN and WEBHOOK_URL and WEBHOOK_SECRET:
+    try:
+        requests.post(
+            f"{TELEGRAM_API}/setWebhook",
+            json={
+                "url": f"{WEBHOOK_URL.rstrip('/')}/telegram",
+                "secret_token": WEBHOOK_SECRET
+            },
+            timeout=15
         )
-
-    else:
-        send(
-            chat_id,
-            "دستورات:\n/start\n/price\n/status\n/help"
-        )
-
-def main():
-    print("Soheil AI Trader started")
-    offset = None
-
-    while True:
-        try:
-            params = {"timeout": 30}
-
-            if offset is not None:
-                params["offset"] = offset
-
-            result = telegram("getUpdates", params)
-
-            for update in result.get("result", []):
-                offset = update["update_id"] + 1
-
-                message = update.get("message", {})
-                chat = message.get("chat", {})
-                chat_id = chat.get("id")
-                text = message.get("text", "")
-
-                if chat_id and text.startswith("/"):
-                    handle(chat_id, text.split()[0])
-
-        except Exception as error:
-            print("Error:", error)
-            time.sleep(5)
-
-if __name__ == "__main__":
-    main()
+    except Exception:
+        pass
